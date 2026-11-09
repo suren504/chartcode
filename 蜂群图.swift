@@ -66,7 +66,7 @@ guard (1...30).contains(teams.count), Set(codes).count == teams.count,
 }
 
 let logoDirectory = URL(fileURLWithPath: #filePath).standardizedFileURL
-    .deletingLastPathComponent().appendingPathComponent("素材/NBA球队LOGO", isDirectory: true)
+    .deletingLastPathComponent().appendingPathComponent("素材/LOGO", isDirectory: true)
 let canvas = CGRect(x: 0, y: 0, width: 864, height: 648)
 let panel = CGRect(x: 28, y: 106, width: canvas.width - 56, height: 500)
 let markerArea = panel.insetBy(dx: 0, dy: 32)
