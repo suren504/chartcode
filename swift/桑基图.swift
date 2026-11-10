@@ -59,8 +59,9 @@ guard (2...3).contains(args.count) else {
 }
 let input = URL(fileURLWithPath: args[1]).standardizedFileURL
 let directory = input.deletingLastPathComponent()
+let root = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent().deletingLastPathComponent()
 let output = args.count == 3 ? URL(fileURLWithPath: args[2]).standardizedFileURL
-    : directory.appendingPathComponent("桑基图.png")
+    : root.appendingPathComponent("成品图/桑基图.png")
 guard output.pathExtension.lowercased() == "png",
       output.resolvingSymlinksInPath() != input.resolvingSymlinksInPath() else {
     fail("输出须为独立的 PNG 路径")
@@ -127,6 +128,15 @@ let palettes: [[UInt32]] = [[0x9E413A, 0xB7746B, 0xAC6155, 0x78423F, 0xD09287],
                             [0x56899A, 0x78A3B1, 0x315967, 0x467685, 0x97B5BA]]
 let leafColors = Array(palettes[0].prefix(split)) + Array(palettes[1].prefix(leaves.count - split))
 let ink = color(0x2B2B2B), gray = color(0x7A7A7A)
+let styles = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("样式.json")))
+    as? [String: [String: Any]] ?? [:]
+let heading = (styles["header"] ?? [:]).merging(styles["桑基图"] ?? [:]) { _, value in value }
+guard let titleSize = heading["title"] as? Double, let subtitleSize = heading["subtitle"] as? Double,
+      let titleBold = heading["titleBold"] as? Bool, let subtitleBold = heading["subtitleBold"] as? Bool,
+      let titleHex = rgb(heading["titleColor"] as? String ?? ""),
+      let subtitleHex = rgb(heading["subtitleColor"] as? String ?? "") else {
+    fail("样式.json 缺少有效的标题样式")
+}
 
 guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
                                     bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -183,17 +193,18 @@ func drawHeader() {
     let hasSubtitle = !subtitle.isEmpty || !credit.isEmpty
     let limit = CGFloat(width) - 80
     drawText(data.title, at: CGPoint(x: CGFloat(width) / 2, y: hasSubtitle ? 24 : 60),
-             font: face(119, bold: true), v: .start, limit: limit)
+             font: face(titleSize, bold: titleBold), foreground: color(titleHex), v: .start, limit: limit)
     guard hasSubtitle else { return }
 
     func subtitleRun(_ size: CGFloat) -> NSAttributedString {
         let text = NSMutableAttributedString(attributedString:
-            run(subtitle + (!subtitle.isEmpty && !credit.isEmpty ? " | " : ""), face(size), gray))
+            run(subtitle + (!subtitle.isEmpty && !credit.isEmpty ? " | " : ""),
+                face(size, bold: subtitleBold), color(subtitleHex)))
         text.append(run(credit, face(size, bold: true), .black))
         return text
     }
-    var text = subtitleRun(77)
-    if text.size().width > limit { text = subtitleRun(77 * limit / text.size().width) }
+    var text = subtitleRun(subtitleSize)
+    if text.size().width > limit { text = subtitleRun(subtitleSize * limit / text.size().width) }
     text.draw(at: CGPoint(x: (CGFloat(width) - text.size().width) / 2, y: 164))
 }
 

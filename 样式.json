@@ -1,0 +1,12 @@
+{
+  "header": {
+    "titleColor": "#2C3E50",
+    "subtitleColor": "#566473",
+    "titleBold": true,
+    "subtitleBold": true
+  },
+  "散点图": {"title": 48, "subtitle": 22, "axisPadding": 0.10},
+  "表格杠铃图": {"title": 32, "subtitle": 16, "paperWhiteOverlay": 0.12},
+  "蜂群图": {"title": 28, "subtitle": 12.5, "subtitleBold": false},
+  "桑基图": {"title": 119, "subtitle": 77, "subtitleBold": false}
+}

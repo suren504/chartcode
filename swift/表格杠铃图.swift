@@ -2,34 +2,66 @@ import AppKit
 import Foundation
 import CoreText
 
-// Agent：先读同目录 README.md。数据、文案和素材按当次任务准备。
-let baseDirectory = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent()
+let root = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent().deletingLastPathComponent()
 guard CommandLine.arguments.count > 1 else {
-    print("用法：swift 表格杠铃图.swift /数据文件.json [/输出目录] [/配置.json]")
+    print("用法：swift swift/表格杠铃图.swift 数据.json [成品.png]")
     exit(0)
 }
 let dataFile = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
-let outputDirectory = CommandLine.arguments.count > 2
-    ? URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true).standardizedFileURL
-    : dataFile.deletingLastPathComponent()
-struct Configuration: Decodable {
-    let title: String, subtitle: String, playerLabel: String
-    let columnLabels: [String]
-    let paperWhiteOverlay: Double
-}
-let configFile = CommandLine.arguments.count > 3
-    ? URL(fileURLWithPath: CommandLine.arguments[3]).standardizedFileURL
-    : baseDirectory.appendingPathComponent("绘图配置.json")
-guard FileManager.default.fileExists(atPath: configFile.path) else {
-    FileHandle.standardError.write(Data("请传入当次图表配置文件\n".utf8))
+let destination = CommandLine.arguments.count > 2
+    ? URL(fileURLWithPath: CommandLine.arguments[2]).standardizedFileURL
+    : root.appendingPathComponent("成品图/表格杠铃图.png")
+let paperFile = destination.pathExtension.lowercased() == "png" && !destination.hasDirectoryPath
+    ? destination : destination.appendingPathComponent("表格杠铃图.png")
+let outputDirectory = paperFile.deletingLastPathComponent()
+let transparentFile = outputDirectory.appendingPathComponent(paperFile.deletingPathExtension().lastPathComponent + "_透明.png")
+guard [paperFile, transparentFile].allSatisfy({ $0.resolvingSymlinksInPath() != dataFile.resolvingSymlinksInPath() }) else {
+    FileHandle.standardError.write(Data("请指定独立的 PNG 输出路径\n".utf8))
     exit(1)
 }
-let configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: configFile))
-precondition(configuration.columnLabels.count == 3 && (0...1).contains(configuration.paperWhiteOverlay), "请检查三列表头和背景白色叠加比例")
-let title = configuration.title
-let subtitle = configuration.subtitle
+struct Configuration: Decodable {
+    let title: String, playerLabel: String
+    let subtitle: String?
+    let columnLabels: [String]
+    let paperWhiteOverlay: Double?
+    let rows: [Row]?
+}
+let decoder = JSONDecoder()
+let input = try Data(contentsOf: dataFile)
+let configuration: Configuration
+let sourceRows: [Row]
+if CommandLine.arguments.count <= 3,
+   let combined = try? decoder.decode(Configuration.self, from: input), let rows = combined.rows {
+    configuration = combined
+    sourceRows = rows
+} else {
+    let configFile = CommandLine.arguments.count > 3
+        ? URL(fileURLWithPath: CommandLine.arguments[3]).standardizedFileURL
+        : root.appendingPathComponent("绘图配置.json")
+    guard FileManager.default.fileExists(atPath: configFile.path) else {
+        FileHandle.standardError.write(Data("输入须包含标题、表头和 rows，旧版数组需另传配置文件\n".utf8))
+        exit(1)
+    }
+    configuration = try decoder.decode(Configuration.self, from: Data(contentsOf: configFile))
+    sourceRows = try decoder.decode([Row].self, from: input)
+}
+let styles = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("样式.json")))
+    as? [String: [String: Any]] ?? [:]
+let heading = (styles["header"] ?? [:]).merging(styles["表格杠铃图"] ?? [:]) { _, value in value }
+func headingColor(_ key: String) -> NSColor? {
+    guard let value = heading[key] as? String, let rgb = UInt32(value.dropFirst(), radix: 16) else { return nil }
+    return NSColor(srgbRed: Double((rgb >> 16) & 255) / 255,
+                   green: Double((rgb >> 8) & 255) / 255, blue: Double(rgb & 255) / 255, alpha: 1)
+}
+guard let titleSize = heading["title"] as? Double, let subtitleSize = heading["subtitle"] as? Double,
+      let titleBold = heading["titleBold"] as? Bool, let subtitleBold = heading["subtitleBold"] as? Bool,
+      let titleColor = headingColor("titleColor"), let subtitleColor = headingColor("subtitleColor"),
+      let paperWhiteOverlay = configuration.paperWhiteOverlay ?? (heading["paperWhiteOverlay"] as? Double),
+      configuration.columnLabels.count == 3, (0...1).contains(paperWhiteOverlay) else {
+    FileHandle.standardError.write(Data("请检查标题样式、三列表头和背景白色叠加比例\n".utf8))
+    exit(1)
+}
 let columnLabels = configuration.columnLabels
-let paperWhiteOverlay = configuration.paperWhiteOverlay
 
 struct Row: Decodable {
     let name: String
@@ -39,7 +71,7 @@ struct Row: Decodable {
 
     var difference: Double { on_off ?? (on - off) }
 }
-let rows = try JSONDecoder().decode([Row].self, from: Data(contentsOf: dataFile))
+let rows = sourceRows
     .sorted { $0.difference == $1.difference ? $0.name < $1.name : $0.difference > $1.difference }
 precondition(!rows.isEmpty, "数据不能为空")
 precondition(rows.allSatisfy { row in
@@ -130,8 +162,8 @@ let raw = (maxValue-minValue)/6, magnitude = pow(10, floor(log10(raw)))
 let normalized = raw / magnitude
 let step = (normalized <= 1 ? 1.0 : normalized <= 2 ? 2.0 : normalized <= 5 ? 5.0 : 10.0) * magnitude
 var tick = ceil(minValue/step)*step
-text(title, 40, 17, 32, ink, bold: true)
-text(subtitle, 40, 68, 16, soft, bold: true)
+text(configuration.title, 40, 17, titleSize, titleColor, bold: titleBold)
+text(configuration.subtitle ?? "", 40, 68, subtitleSize, subtitleColor, bold: subtitleBold)
 text(configuration.playerLabel, 40, 129, 11, soft)
 for (index, label) in columnLabels.enumerated() {
     let right = 310.0 + Double(index)*80
@@ -176,7 +208,6 @@ for (index, row) in rows.enumerated() {
     marker(row, x(row.off), y, color, faded: true)
     marker(row, x(row.on), y, color, faded: false)
 }
-let transparentFile = outputDirectory.appendingPathComponent("表格杠铃图_透明.png")
 try bitmap.representation(using: .png, properties: [:])!.write(to: transparentFile)
 print("已保存 \(transparentFile.path)（\(bitmap.pixelsWide)×\(bitmap.pixelsHigh)）")
 let composed = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int(height * scale), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -185,7 +216,7 @@ paperContext.translateBy(x: 0, y: height * scale); paperContext.scaleBy(x: scale
 NSGraphicsContext.current = NSGraphicsContext(cgContext: paperContext, flipped: true)
 let fullRect = NSRect(x: 0, y: 0, width: width, height: height)
 // Tile without distorting the paper grain; the foreground remains a separate alpha layer.
-guard let paper = NSImage(contentsOf: baseDirectory.appendingPathComponent("斑驳报纸.png")) else { fatalError("缺少背景：斑驳报纸.png") }
+guard let paper = NSImage(contentsOf: root.appendingPathComponent("素材/斑驳报纸.png")) else { fatalError("缺少背景：素材/斑驳报纸.png") }
 for tileY in stride(from: 0.0, to: height, by: 740.0) {
     for tileX in stride(from: 0.0, to: width, by: 740.0) {
         paper.draw(in: NSRect(x: tileX, y: tileY, width: 740, height: 740), from: .zero, operation: .copy, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
@@ -196,6 +227,5 @@ NSColor.white.withAlphaComponent(paperWhiteOverlay).setFill()
 paperContext.fill(fullRect)
 foreground.addRepresentation(bitmap)
 foreground.draw(in: fullRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-let paperFile = outputDirectory.appendingPathComponent("表格杠铃图.png")
 try composed.representation(using: .png, properties: [:])!.write(to: paperFile)
 print("已保存 \(paperFile.path)；字体：\(typeface(13, false).fontName)、\(typeface(13, true).fontName)")

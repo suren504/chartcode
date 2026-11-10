@@ -1,25 +1,21 @@
-"""用 Windows 上的 Pillow 绘制球队指标蜂群图。"""
+"""用 Pillow 绘制球队指标蜂群图。"""
 
 import argparse
-import json
 import math
-import os
 import re
-from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
+from _shared import ASSETS, OUTPUT, heading_style, load_font, read_json
 
-BASE = Path(__file__).resolve().parent
-LOGOS = BASE / '素材/LOGO'
-FONTS = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts'
+LOGOS = ASSETS / 'LOGO'
 SCALE = 200 / 72
 WIDTH, HEIGHT = 2400, 1800
 PANEL_LEFT, PANEL_RIGHT = 28, 836
 PANEL_TOP, PANEL_BOTTOM = 106, 606
 MARKER_TOP, MARKER_BOTTOM = PANEL_TOP + 32, PANEL_BOTTOM - 32
-INK, SOFT = '#3A3A3A', '#5A5855'
+INK = '#3A3A3A'
 
 
 def finite(value):
@@ -27,39 +23,51 @@ def finite(value):
 
 
 def load_input(path):
-    data = json.loads(path.read_text(encoding='utf-8-sig'))
+    data = read_json(path)
     if not isinstance(data, dict) or not isinstance(data.get('title'), str):
         raise ValueError('绘图输入须包含标题 title')
     for key in ('titlePrefix', 'method', 'credit', 'source', 'asOf', 'leftLabel', 'rightLabel'):
         if data.get(key) is not None and not isinstance(data[key], str):
             raise ValueError(f'{key} 必须是文字')
     parts = data.get('subtitle')
-    if parts is not None:
+    if parts is not None and not isinstance(parts, str):
         if not isinstance(parts, list) or any(
             not isinstance(p, dict) or not isinstance(p.get('label'), str)
             or (p.get('value') is not None and not isinstance(p['value'], str))
             or p.get('style') not in (None, 'mono', 'credit') for p in parts
         ):
             raise ValueError('subtitle 须由 label、可选 value 和 style 组成')
-    teams = data.get('teams')
-    if not isinstance(teams, list) or not 1 <= len(teams) <= 30:
-        raise ValueError('请提供 1 至 30 支球队')
     rows = []
-    for row in teams:
-        if not isinstance(row, dict) or not isinstance(row.get('team'), str) or not finite(row.get('strength')):
-            raise ValueError('每支球队须有球队缩写和有效评分')
-        code = row['team'].upper()
-        if not re.fullmatch(r'[A-Z]{3}', code):
-            raise ValueError(f'球队缩写须为三个英文字母：{code}')
-        rows.append((code, row['strength']))
-    if len({code for code, _ in rows}) != len(rows):
-        raise ValueError('球队缩写不能重复')
+    if 'points' in data:
+        points = data['points']
+        if not isinstance(points, list) or not 1 <= len(points) <= 30:
+            raise ValueError('请提供 1 至 30 个数据点')
+        for point in points:
+            if not isinstance(point, dict) or not finite(point.get('value')):
+                raise ValueError('每个数据点须包含有效数值 value')
+            logo = point.get('logo')
+            if logo is not None and not isinstance(logo, str):
+                raise ValueError('logo 须为素材路径')
+            rows.append((path.parent / logo if logo is not None else None, point['value']))
+    else:
+        teams = data.get('teams')
+        if not isinstance(teams, list) or not 1 <= len(teams) <= 30:
+            raise ValueError('请提供 points 或 1 至 30 支球队')
+        codes = set()
+        for team in teams:
+            if not isinstance(team, dict) or not isinstance(team.get('team'), str) or not finite(team.get('strength')):
+                raise ValueError('每支球队须有球队缩写和有效评分')
+            code = team['team'].upper()
+            if not re.fullmatch(r'[A-Z]{3}', code) or code in codes:
+                raise ValueError(f'球队缩写须为三个英文字母且不能重复：{code}')
+            codes.add(code)
+            rows.append((LOGOS / f'{code}.webp', team['strength']))
     rows.sort(key=lambda row: row[1])
     axis = data.get('xRange')
     if axis is None:
         low, high = rows[0][1], rows[-1][1]
-        padding = (max(11.5, high) - min(-5, low)) * 0.04
-        minimum, maximum = min(-5, low - padding), max(11.5, high + padding)
+        padding = (high - low) * 0.12 if high > low else max(1, abs(low) * 0.05)
+        minimum, maximum = low - padding, high + padding
     elif isinstance(axis, dict) and finite(axis.get('min')) and finite(axis.get('max')):
         minimum, maximum = axis['min'], axis['max']
     else:
@@ -69,16 +77,8 @@ def load_input(path):
     return data, rows, minimum, maximum
 
 
-@lru_cache(maxsize=32)
 def font(size, mono=False, bold=False):
-    if mono:
-        file = 'consolab.ttf' if bold else 'consola.ttf'
-    else:
-        file = 'msyhbd.ttc' if bold else 'msyh.ttc'
-    try:
-        return ImageFont.truetype(str(FONTS / file), round(size * SCALE))
-    except OSError as exc:
-        raise ValueError(f'无法读取 Windows 字体：{file}') from exc
+    return load_font(size * SCALE, mono=mono, bold=bold)
 
 
 def point(x, y):
@@ -128,9 +128,10 @@ def render(data, rows, minimum, maximum):
         return PANEL_LEFT + (PANEL_RIGHT - PANEL_LEFT) * ((value - minimum) / span)
 
     xs = [x_at(value) for _, value in rows]
-    diameter = 0.68 * 72
+    preferred = 0.68 * 72 if any(path is not None for path, _ in rows) else 13
+    diameter = preferred
     centers = swarm(xs, diameter)
-    while centers is None and diameter > 0.68 * 72 * 0.3:
+    while centers is None and diameter > preferred * 0.3:
         diameter *= 0.85
         centers = swarm(xs, diameter)
     if centers is None:
@@ -138,11 +139,17 @@ def render(data, rows, minimum, maximum):
 
     canvas = Image.new('RGB', (WIDTH, HEIGHT), '#F4F6F8')
     draw = ImageDraw.Draw(canvas)
-    title = [(data.get('titlePrefix'), font(28, mono=True, bold=True), INK), (data['title'], font(28, bold=True), INK)]
+    heading = heading_style(__file__)
+    title_size, subtitle_size = heading['title'], heading['subtitle']
+    title_bold, subtitle_bold = heading['titleBold'], heading['subtitleBold']
+    title = [(data.get('titlePrefix'), font(title_size, mono=True, bold=title_bold), heading['titleColor']),
+             (data['title'], font(title_size, bold=title_bold), heading['titleColor'])]
     draw_runs(draw, title, 432, 28, heading=True)
     parts = data.get('subtitle')
     separator = '｜' if parts is not None else ' | '
-    if parts is None:
+    if isinstance(parts, str):
+        parts = [{'label': '', 'value': parts}]
+    elif parts is None:
         parts = [
             {'label': '', 'value': data.get('method')},
             {'label': '制图: ', 'value': data.get('credit'), 'style': 'credit'},
@@ -155,9 +162,11 @@ def render(data, rows, minimum, maximum):
             continue
         style = part.get('style')
         credit = style == 'credit'
-        subtitle.append(((separator if subtitle else '') + part['label'], font(12.5), SOFT))
-        subtitle.append((part['value'], font(18 if credit else 12.5, mono=style == 'mono', bold=credit),
-                         '#000000' if credit else SOFT))
+        subtitle.append(((separator if subtitle else '') + part['label'],
+                         font(subtitle_size, bold=subtitle_bold), heading['subtitleColor']))
+        subtitle.append((part['value'], font(subtitle_size * 1.44 if credit else subtitle_size,
+                                           mono=style == 'mono', bold=credit or subtitle_bold),
+                         '#000000' if credit else heading['subtitleColor']))
     draw_runs(draw, subtitle, 432, 66, heading=True)
 
     raw_step = span / 8.25
@@ -176,24 +185,29 @@ def render(data, rows, minimum, maximum):
                 draw.line((point(x, y), point(x, min(y + 4, PANEL_BOTTOM))), fill='#B9B5AE', width=2)
         else:
             draw.line((point(x, PANEL_TOP), point(x, PANEL_BOTTOM)), fill='#E7E4DF', width=2)
-        label = ('+' if tick > 0 else '') + f'{tick:g}'
+        label = ('+' if 'points' not in data and tick > 0 else '') + f'{tick:g}'
         draw_runs(draw, [(label, font(13, mono=True), '#6A6865')], x, PANEL_BOTTOM + 4)
 
     logo_size = round(diameter * 0.8 * SCALE)
-    for (code, _), (x, y) in zip(rows, centers):
-        path = LOGOS / f'{code}.webp'
+    for (path, _), (x, y) in zip(rows, centers):
+        if path is None:
+            radius = 5
+            draw.ellipse((*point(x - radius, y - radius), *point(x + radius, y + radius)), fill=INK)
+            continue
         if not path.is_file():
-            raise ValueError(f'找不到 {code} 的球队 Logo：{path}')
+            raise ValueError(f'找不到 Logo：{path}')
         with Image.open(path) as image:
-            logo = image.convert('RGBA').resize((logo_size, logo_size), Image.Resampling.LANCZOS)
-        canvas.paste(logo, (round(x * SCALE - logo_size / 2), round(y * SCALE - logo_size / 2)), logo)
+            logo = image.convert('RGBA')
+        ratio = logo_size / max(logo.size)
+        logo = logo.resize(tuple(max(1, round(side * ratio)) for side in logo.size), Image.Resampling.LANCZOS)
+        canvas.paste(logo, (round(x * SCALE - logo.width / 2), round(y * SCALE - logo.height / 2)), logo)
 
-    edge = (PANEL_RIGHT - PANEL_LEFT) * 0.15 / 16.5
-    weak = data.get('leftLabel') if data.get('leftLabel') is not None else '实力较弱'
-    strong = data.get('rightLabel') if data.get('rightLabel') is not None else '实力较强'
+    edge = 7
     directions = font(15.6, bold=True)
-    draw_runs(draw, [(f'← {weak}', directions, INK)], PANEL_LEFT + edge, PANEL_BOTTOM - 27, align='left')
-    draw_runs(draw, [(f'{strong} →', directions, INK)], PANEL_RIGHT - edge, PANEL_BOTTOM - 27, align='right')
+    if data.get('leftLabel'):
+        draw_runs(draw, [(f'← {data["leftLabel"]}', directions, INK)], PANEL_LEFT + edge, PANEL_BOTTOM - 27, align='left')
+    if data.get('rightLabel'):
+        draw_runs(draw, [(f'{data["rightLabel"]} →', directions, INK)], PANEL_RIGHT - edge, PANEL_BOTTOM - 27, align='right')
     return canvas
 
 
@@ -203,7 +217,7 @@ def main():
     parser.add_argument('output', type=Path, nargs='?', help='输出 PNG 路径')
     args = parser.parse_args()
     try:
-        output = args.output or args.input.with_name('NBA球队实力蜂群图.png')
+        output = args.output or OUTPUT / '蜂群图.png'
         if output.suffix.lower() != '.png' or output.resolve() == args.input.resolve():
             raise ValueError('输出须为独立的 PNG 路径')
         canvas = render(*load_input(args.input))

@@ -1,16 +1,13 @@
-"""统一入口：macOS 优先 Swift，无可用 Swift 时使用跨平台 Pillow。"""
+"""绘制表格杠铃图，兼容旧版分文件输入。"""
 
 import argparse
 from functools import lru_cache
-import json
 import math
-import os
 from pathlib import Path
-import shutil
-import subprocess
 import sys
 
-BASE = Path(__file__).resolve().parent
+from _shared import ASSETS, OUTPUT, ROOT, heading_style, load_font, read_json, run_swift
+
 SCALE = 2
 INK = (44, 62, 80, 255)
 SOFT = (86, 100, 115, 255)
@@ -18,10 +15,19 @@ RULE = (44, 62, 80, 36)
 ACCENT = (217, 83, 79, 255)
 
 
-def load_inputs(data_file, config_file=BASE / "绘图配置.json"):
-    if not config_file.is_file():
-        raise ValueError("请用 --config 指定当次图表配置")
-    config = json.loads(config_file.read_text(encoding="utf-8-sig"))
+def load_inputs(data_file, config_file=None):
+    data = read_json(data_file)
+    if isinstance(data, dict) and config_file is None:
+        config, rows = data, data.get("rows")
+    else:
+        config_file = config_file or ROOT / "绘图配置.json"
+        if not config_file.is_file():
+            raise ValueError("旧版行数组须搭配 --config，或将文案和 rows 放进同一个 JSON 对象")
+        config, rows = read_json(config_file), data
+    if not isinstance(config, dict):
+        raise ValueError("图表配置须为 JSON 对象")
+    config.setdefault("subtitle", "")
+    config.setdefault("paperWhiteOverlay", heading_style(__file__)["paperWhiteOverlay"])
     if not all(isinstance(config.get(key), str) for key in ("title", "subtitle", "playerLabel")):
         raise ValueError("标题、副标题和对象表头必须是文字")
     labels = config.get("columnLabels")
@@ -30,7 +36,6 @@ def load_inputs(data_file, config_file=BASE / "绘图配置.json"):
     overlay = config.get("paperWhiteOverlay")
     if type(overlay) not in (int, float) or not math.isfinite(overlay) or not 0 <= overlay <= 1:
         raise ValueError("paperWhiteOverlay 必须在 0 到 1 之间")
-    rows = json.loads(data_file.read_text(encoding="utf-8-sig"))
     if not isinstance(rows, list) or not rows:
         raise ValueError("数据必须是非空 JSON 数组")
     for i, row in enumerate(rows, 1):
@@ -61,47 +66,10 @@ def load_inputs(data_file, config_file=BASE / "绘图配置.json"):
 def render_python(data_file, output, config, rows):
     # Swift 可用时不会导入 Pillow，也不需要安装它。
     try:
-        from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+        from PIL import Image, ImageChops, ImageDraw, ImageOps
     except ImportError as exc:
         raise ValueError('Python 引擎需要 Pillow，请先运行：python -m pip install -r "'
-                         + str(BASE / "requirements.txt") + '"') from exc
-
-    fonts_dir = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
-    mac_fonts = Path("/System/Library/Fonts")
-    pingfang = [(mac_fonts / "PingFang.ttc", 0)]
-    assets = Path("/System/Library/AssetsV2/com_apple_MobileAsset_Font7")
-    if sys.platform == "darwin" and assets.is_dir():
-        pingfang.extend((p, 0) for p in assets.glob("*/AssetData/PingFang.ttc"))
-
-    def choose(candidates, label):
-        for path, index in candidates:
-            if path.is_file():
-                try:
-                    ImageFont.truetype(str(path), 20, index=index)
-                    return str(path), index
-                except OSError:
-                    continue
-        raise ValueError(f"找不到{label}字体；Windows 请安装微软雅黑，Linux 请安装 DejaVu Sans Mono 和 Noto Sans CJK")
-
-    regular = choose([(fonts_dir / "consola.ttf", 0), (mac_fonts / "Menlo.ttc", 0),
-                      (Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"), 0)], "英文")
-    bold = choose([(fonts_dir / "consolab.ttf", 0), (mac_fonts / "Menlo.ttc", 1),
-                   (Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"), 0)], "英文粗体")
-    all_text = "".join([config["title"], config["subtitle"], config["playerLabel"],
-                        *config["columnLabels"], *(row["name"] for row in rows)])
-    needs_cjk = any(ord(c) > 127 for c in all_text)
-    cjk_candidates = [(fonts_dir / "msyh.ttc", 0), *pingfang,
-                      (mac_fonts / "Supplemental/Songti.ttc", 0),
-                      (Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"), 0)]
-    cjk = choose(cjk_candidates, "中文") if needs_cjk else regular
-    cjk_bold = choose([(fonts_dir / "msyhbd.ttc", 0), *pingfang,
-                       (mac_fonts / "Supplemental/Songti.ttc", 1),
-                       (Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"), 0)], "中文粗体") if needs_cjk else bold
-
-    @lru_cache(maxsize=128)
-    def font(size, heavy, chinese):
-        path, index = (cjk_bold if heavy else cjk) if chinese else (bold if heavy else regular)
-        return ImageFont.truetype(path, max(1, round(size * SCALE)), index=index)
+                         + str(ROOT / "requirements.txt") + '"') from exc
 
     def runs(value, size, heavy):
         # 显式分配中英文字体，避免 Pillow 缺少系统级字体回退而显示方框。
@@ -112,7 +80,7 @@ def render_python(data_file, output, config, rows):
                 result[-1][1] += char
             else:
                 result.append([chinese, char])
-        return [(part, font(size, heavy, chinese)) for chinese, part in result]
+        return [(part, load_font(size * SCALE, bold=heavy, mono=not chinese)) for chinese, part in result]
 
     def text_width(value, size, heavy=False):
         return sum(f.getlength(part) for part, f in runs(value, size, heavy)) / SCALE
@@ -216,8 +184,9 @@ def render_python(data_file, output, config, rows):
     magnitude = 10 ** math.floor(math.log10(raw))
     normalized = raw/magnitude
     step = next(v for v in (1, 2, 5, 10) if normalized <= v) * magnitude
-    text(config["title"], 40, 17, 32, INK, True)
-    text(config["subtitle"], 40, 68, 16, SOFT, True)
+    heading = heading_style(__file__)
+    text(config["title"], 40, 17, heading["title"], heading["titleColor"], heading["titleBold"])
+    text(config["subtitle"], 40, 68, heading["subtitle"], heading["subtitleColor"], heading["subtitleBold"])
     text(config["playerLabel"], 40, 129, 11, SOFT)
     for index, label in enumerate(config["columnLabels"]):
         right = 310 + index*80
@@ -258,7 +227,7 @@ def render_python(data_file, output, config, rows):
         marker(row, x(row["off"]), y, color, True)
         marker(row, x(row["on"]), y, color, False)
 
-    with Image.open(BASE / "斑驳报纸.png") as source:
+    with Image.open(ASSETS / "斑驳报纸.png") as source:
         tile = source.convert("RGBA").resize((740*SCALE, 740*SCALE), Image.Resampling.LANCZOS)
     paper = Image.new("RGBA", canvas.size)
     for tile_y in range(0, paper.height, tile.height):
@@ -266,37 +235,35 @@ def render_python(data_file, output, config, rows):
             paper.paste(tile, (tile_x, tile_y))
     paper = Image.alpha_composite(paper, Image.new("RGBA", paper.size, (255, 255, 255, round(config["paperWhiteOverlay"]*255))))
     paper.alpha_composite(canvas)
-    output.mkdir(parents=True, exist_ok=True)
-    for name, image in (("表格杠铃图_透明.png", canvas), ("表格杠铃图.png", paper)):
-        image.save(output / name)
-        print(f"已保存 {output / name}（{image.width}×{image.height}）")
-    print(f"字体：{regular[0]}；中文：{cjk[0]}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    transparent = output.with_name(f"{output.stem}_透明.png")
+    for path, image in ((transparent, canvas), (output, paper)):
+        image.save(path)
+        print(f"已保存 {path}（{image.width}×{image.height}）")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path, help="数据 JSON 文件")
-    parser.add_argument("output", type=Path, nargs="?", help="输出目录，默认数据文件所在目录")
-    parser.add_argument("--config", type=Path, default=BASE / "绘图配置.json", help="当次图表配置 JSON")
+    parser.add_argument("output", type=Path, nargs="?", help="输出 PNG，兼容旧版输出目录")
+    parser.add_argument("--config", type=Path, help="旧版行数组对应的配置 JSON")
     parser.add_argument("--engine", choices=("auto", "swift", "python"), default="auto", help="默认 auto；可指定引擎")
     args = parser.parse_args()
     data_file = args.data.resolve()
-    output = args.output.resolve() if args.output else data_file.parent
+    output = args.output.resolve() if args.output else OUTPUT / "表格杠铃图.png"
+    if output.suffix.lower() != ".png" or output.is_dir():
+        output = output / "表格杠铃图.png"
     try:
-        config_file = args.config.resolve()
+        if data_file in (output, output.with_name(f"{output.stem}_透明.png")):
+            raise ValueError("请指定独立的 PNG 输出路径")
+        config_file = args.config.resolve() if args.config else None
         config, rows = load_inputs(data_file, config_file)
-        swift = shutil.which("swift") if sys.platform == "darwin" else None
-        if args.engine == "swift" and not swift:
-            raise ValueError("Swift 引擎需要 macOS、Swift 和 AppKit；请改用 --engine python")
-        if args.engine != "python" and swift:
-            print("使用 Swift/AppKit 引擎", flush=True)
-            result = subprocess.run([swift, str(BASE / "表格杠铃图.swift"), str(data_file), str(output), str(config_file)])
-            if result.returncode == 0:
-                return 0
-            if args.engine == "swift":
-                return result.returncode
-            print("Swift 执行失败，自动尝试 Python 引擎。", file=sys.stderr)
-        print("使用 Python/Pillow 引擎", flush=True)
+        arguments = [data_file, output]
+        if config_file:
+            arguments.append(config_file)
+        result = run_swift("表格杠铃图", arguments, args.engine)
+        if result is not None:
+            return result
         render_python(data_file, output, config, rows)
         return 0
     except (OSError, ValueError, KeyError) as exc:

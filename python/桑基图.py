@@ -1,14 +1,12 @@
 """用 Pillow 绘制总量、两个分组和子类之间的多面板桑基图。"""
 
 import argparse
-import json
 import math
-import os
-from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw
 
+from _shared import OUTPUT, heading_style, load_font, read_json
 
 SS, DPI = 2, 110
 W, H = 8.5, 6.8
@@ -23,24 +21,15 @@ LEAF_COLORS = (
     ('#9E413A', '#B7746B', '#AC6155', '#78423F', '#D09287'),
     ('#56899A', '#78A3B1', '#315967', '#467685', '#97B5BA'),
 )
-FONTS = {
-    'zh-Hans': ('msyh.ttc', 'msyhbd.ttc'),
-    'zh-Hant': ('msjh.ttc', 'msjhbd.ttc'),
-    'en': ('segoeui.ttf', 'segoeuib.ttf'),
-}
-FONT_DIR = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts'
+LANGUAGES = {'zh-Hans', 'zh-Hant', 'en'}
 
 
-@lru_cache(maxsize=128)
-def font(file, px):
-    try:
-        return ImageFont.truetype(str(FONT_DIR / file), round(px * SS))
-    except OSError as exc:
-        raise ValueError(f'无法读取 Windows 字体：{file}') from exc
+def font(px, **style):
+    return load_font(px * SS, **style)
 
 
 def load_input(path):
-    data = json.loads(path.read_text(encoding='utf-8-sig'))
+    data = read_json(path)
     if not isinstance(data, dict):
         raise ValueError('绘图输入必须是 JSON 对象')
     for key in ('title', 'totalLabel'):
@@ -50,7 +39,7 @@ def load_input(path):
         if not isinstance(data.get(key, ''), str):
             raise ValueError(f'{key} 必须是文字')
     language = data.get('language', 'zh-Hans')
-    if not isinstance(language, str) or language not in FONTS:
+    if not isinstance(language, str) or language not in LANGUAGES:
         raise ValueError('language 必须是 zh-Hans、zh-Hant 或 en')
     columns = data.get('columns', 4)
     if type(columns) is not int or not 1 <= columns <= 5:
@@ -126,8 +115,7 @@ def render_panel(row, data, groups, gaps, per_unit, input_dir):
     draw, ribbon_draw = ImageDraw.Draw(panel), ImageDraw.Draw(ribbons)
     scale = BODY_SCALE * SS
     language = data.get('language', 'zh-Hans')
-    regular = FONTS[language][0]
-    label_font = font(regular, 28 if language == 'en' else 32)
+    label_font = font(28 if language == 'en' else 32, language=language)
     values = [row['values'][leaf['key']] for group in groups for leaf in group['leaves']]
     split = len(groups[0]['leaves'])
     mid_values = (sum(values[:split]), sum(values[split:]))
@@ -185,7 +173,7 @@ def render_panel(row, data, groups, gaps, per_unit, input_dir):
     for span, color in zip(leaf_spans, leaf_colors):
         node(X3, span, color)
 
-    label(number(total), X1 - 0.16, yc + 0.06, font('consolab.ttf', 62), h='right', v='bottom', width=1.12 * scale)
+    label(number(total), X1 - 0.16, yc + 0.06, font(62, bold=True, mono=True), h='right', v='bottom', width=1.12 * scale)
     label(data['totalLabel'], X1 - 0.16, yc - 0.06, label_font, color=GRAY, h='right', v='top', width=1.12 * scale)
     xc = (X1 + NODE_W + X2) / 2
     mid_positions = [((source[0] + source[1]) / 2 + y) / 2 for source, y in zip(total_split, mid_centers)]
@@ -194,7 +182,7 @@ def render_panel(row, data, groups, gaps, per_unit, input_dir):
         mid_positions = [center + 0.375, center - 0.375]
     for value, group, y in zip(mid_values, groups, mid_positions):
         if value > 0:
-            label(number(value), xc, y + 0.06, font('consolab.ttf', 47), v='bottom', width=1.75 * scale)
+            label(number(value), xc, y + 0.06, font(47, bold=True, mono=True), v='bottom', width=1.75 * scale)
             label(group['label'], xc, y - 0.06, label_font, v='top', width=1.75 * scale)
 
     xl = X3 + NODE_W + 0.15
@@ -203,11 +191,11 @@ def render_panel(row, data, groups, gaps, per_unit, input_dir):
     for leaf_label, value, span in zip(leaf_labels, values, leaf_spans):
         y = sum(span) / 2
         label(leaf_label, xl, y, label_font, h='left', width=(gap - 0.10) * scale)
-        label(number(value), xl + gap, y, font('consolab.ttf', 34), h='left', width=(W - xl - gap - 0.04) * scale)
+        label(number(value), xl + gap, y, font(34, bold=True, mono=True), h='left', width=(W - xl - gap - 0.04) * scale)
 
     lines = row['name'].strip().splitlines()
-    cjk_font = 'msyh.ttc' if language == 'en' else regular
-    name_font = font(cjk_font if any(ord(c) >= 0x3000 for c in row['name']) else 'consola.ttf', 40)
+    name_font = font(40, mono=not any(ord(c) >= 0x3000 for c in row['name']),
+                     language='zh-Hans' if language == 'en' else language)
     side = round(scale) if 'avatar' in row else 0
     name_gap = 0.16 * scale if side else 0
     name_font = fitted_font(draw, max(lines, key=name_font.getlength), name_font, 3.4 * scale)
@@ -227,17 +215,22 @@ def render_panel(row, data, groups, gaps, per_unit, input_dir):
 
 
 def render_heading(canvas, data):
-    regular, bold = FONTS[data.get('language', 'zh-Hans')]
+    language = data.get('language', 'zh-Hans')
+    heading = heading_style(__file__)
     header = Image.new('RGBA', (canvas.width * SS, BODY_TOP * SS))
     draw = ImageDraw.Draw(header)
     subtitle, credit = data.get('subtitle', ''), data.get('credit', '')
     title_top = 41 if subtitle or credit else 75
-    text(draw, data['title'], header.width / 2, title_top * SS, font(bold, 119),
+    text(draw, data['title'], header.width / 2, title_top * SS,
+         font(heading['title'], bold=heading['titleBold'], language=language), color=heading['titleColor'],
          v='top', width=header.width - 80 * SS)
     if subtitle or credit:
-        credit_font = 'msyhbd.ttc' if bold == 'segoeuib.ttf' and any(ord(c) >= 0x3000 for c in credit) else bold
-        parts = ((subtitle + (' | ' if subtitle and credit else ''), font(regular, 77), GRAY),
-                 (credit, font(credit_font, 77), '#000000'))
+        credit_language = 'zh-Hans' if language == 'en' and any(ord(c) >= 0x3000 for c in credit) else language
+        parts = (
+            (subtitle + (' | ' if subtitle and credit else ''),
+             font(heading['subtitle'], bold=heading['subtitleBold'], language=language), heading['subtitleColor']),
+            (credit, font(heading['subtitle'], bold=True, language=credit_language), '#000000'),
+        )
         measured = sum(draw.textlength(value, font=face) for value, face, _ in parts)
         shrink = min(1, (header.width - 80 * SS) / measured) if measured else 1
         parts = [(value, face.font_variant(size=max(1, round(face.size * shrink))), color)
@@ -256,7 +249,7 @@ def main():
     parser.add_argument('output', type=Path, nargs='?', help='输出 PNG 路径')
     args = parser.parse_args()
     try:
-        output = args.output or args.input.with_name('桑基图.png')
+        output = args.output or OUTPUT / '桑基图.png'
         if output.suffix.lower() != '.png' or output.resolve() == args.input.resolve():
             raise ValueError('输出须为独立的 PNG 路径')
         data = load_input(args.input)

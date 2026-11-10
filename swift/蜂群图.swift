@@ -6,12 +6,30 @@ struct ChartData: Decodable {
         let strength: Double
     }
 
+    struct Point: Decodable {
+        let value: Double
+        let logo: String?
+    }
+
     struct SubtitlePart: Decodable {
         enum Style: String, Decodable { case mono, credit }
 
         let label: String
         let value: String?
         let style: Style?
+    }
+
+    enum Subtitle: Decodable {
+        case text(String), parts([SubtitlePart])
+
+        init(from decoder: Decoder) throws {
+            let value = try decoder.singleValueContainer()
+            if let text = try? value.decode(String.self) {
+                self = .text(text)
+            } else {
+                self = .parts(try value.decode([SubtitlePart].self))
+            }
+        }
     }
 
     struct AxisRange: Decodable {
@@ -25,11 +43,12 @@ struct ChartData: Decodable {
     let credit: String?
     let source: String?
     let asOf: String?
-    let subtitle: [SubtitlePart]?
+    let subtitle: Subtitle?
     let xRange: AxisRange?
     let leftLabel: String?
     let rightLabel: String?
-    let teams: [Team]
+    let teams: [Team]?
+    let points: [Point]?
 }
 
 func fail(_ message: String) -> Never {
@@ -43,11 +62,15 @@ guard (2...3).contains(arguments.count) else {
     fail("用法：swift \(script) /数据.json [/输出.png]")
 }
 
+let root = URL(fileURLWithPath: #filePath).standardizedFileURL.deletingLastPathComponent().deletingLastPathComponent()
 let input = URL(fileURLWithPath: arguments[1]).standardizedFileURL
 let output = arguments.count == 3
     ? URL(fileURLWithPath: arguments[2]).standardizedFileURL
-    : input.deletingLastPathComponent().appendingPathComponent("NBA球队实力蜂群图.png")
-guard output.pathExtension.lowercased() == "png" else { fail("输出文件须使用 .png 扩展名") }
+    : root.appendingPathComponent("成品图/蜂群图.png")
+guard output.pathExtension.lowercased() == "png",
+      output.resolvingSymlinksInPath() != input.resolvingSymlinksInPath() else {
+    fail("请指定独立的 PNG 输出路径")
+}
 
 let data: ChartData
 do {
@@ -56,28 +79,37 @@ do {
     fail("无法读取制图数据：\(error)")
 }
 
-let teams = data.teams.sorted { $0.strength < $1.strength }
-let codes = teams.map { $0.team.uppercased() }
-let invalidCodeCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ").inverted
-guard (1...30).contains(teams.count), Set(codes).count == teams.count,
-      codes.allSatisfy({ $0.count == 3 && $0.rangeOfCharacter(from: invalidCodeCharacters) == nil }),
-      teams.allSatisfy({ $0.strength.isFinite }) else {
-    fail("请提供 1 至 30 支不重复的球队、三字母缩写及有效评分")
+let logoDirectory = root.appendingPathComponent("素材/LOGO", isDirectory: true)
+let rawPoints: [ChartData.Point]
+if let points = data.points {
+    rawPoints = points
+} else {
+    let teams = data.teams ?? []
+    let codes = teams.map { $0.team.uppercased() }
+    let invalid = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ").inverted
+    guard Set(codes).count == codes.count,
+          codes.allSatisfy({ $0.count == 3 && $0.rangeOfCharacter(from: invalid) == nil }) else {
+        fail("球队缩写须为三个英文字母且不能重复")
+    }
+    rawPoints = zip(teams, codes).map { team, code in
+        .init(value: team.strength, logo: logoDirectory.appendingPathComponent("\(code).webp").path)
+    }
 }
-
-let logoDirectory = URL(fileURLWithPath: #filePath).standardizedFileURL
-    .deletingLastPathComponent().appendingPathComponent("素材/LOGO", isDirectory: true)
+guard (1...30).contains(rawPoints.count), rawPoints.allSatisfy({ $0.value.isFinite }) else {
+    fail("请提供 1 至 30 个有效数据点")
+}
+let points = rawPoints.sorted { $0.value < $1.value }
 let canvas = CGRect(x: 0, y: 0, width: 864, height: 648)
 let panel = CGRect(x: 28, y: 106, width: canvas.width - 56, height: 500)
 let markerArea = panel.insetBy(dx: 0, dy: 32)
 let scale = 200.0 / 72
-let preferredDiameter = 0.68 * 72
+let preferredDiameter = points.contains(where: { $0.logo != nil }) ? 0.68 * 72 : 13
 
-let low = teams.first!.strength
-let high = teams.last!.strength
-let padding = (max(11.5, high) - min(-5, low)) * 0.04
-let xMin = data.xRange?.min ?? min(-5, low - padding)
-let xMax = data.xRange?.max ?? max(11.5, high + padding)
+let low = points.first!.value
+let high = points.last!.value
+let padding = high > low ? (high - low) * 0.12 : max(1, abs(low) * 0.05)
+let xMin = data.xRange?.min ?? low - padding
+let xMax = data.xRange?.max ?? high + padding
 let span = xMax - xMin
 guard span.isFinite, span > 0, xMin <= low, high <= xMax else {
     fail("横轴范围需要覆盖所有评分，且最大值必须大于最小值")
@@ -92,8 +124,8 @@ func swarmCenters(diameter: Double) -> [CGPoint]? {
     let steps = Int((markerArea.height - diameter) / (2 * step))
     let offsets = [0.0] + (1...steps).flatMap { [Double($0) * step, -Double($0) * step] }
     var centers: [CGPoint] = []
-    for team in teams {
-        let centerX = x(team.strength)
+    for point in points {
+        let centerX = x(point.value)
         guard let offset = offsets.first(where: { offset in
             centers.allSatisfy { other in
                 let dx = centerX - other.x
@@ -150,26 +182,42 @@ func drawHeading(_ heading: NSAttributedString, at y: Double) {
 context.setFillColor(red: 244.0 / 255, green: 246.0 / 255, blue: 248.0 / 255, alpha: 1)
 context.fill(canvas)
 let ink = color(0x3a3a3a)
-let subtitleColor = color(0x5a5855)
-let title = NSMutableAttributedString(attributedString: run(data.titlePrefix ?? "", 28, ink, mono: true, bold: true))
-title.append(run(data.title, 28, ink, bold: true))
+let styles = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("样式.json")))
+    as? [String: [String: Any]] ?? [:]
+let heading = (styles["header"] ?? [:]).merging(styles["蜂群图"] ?? [:]) { _, value in value }
+guard let titleSize = heading["title"] as? Double, let subtitleSize = heading["subtitle"] as? Double,
+      let titleBold = heading["titleBold"] as? Bool, let subtitleBold = heading["subtitleBold"] as? Bool,
+      let titleHex = UInt32((heading["titleColor"] as? String ?? "").dropFirst(), radix: 16),
+      let subtitleHex = UInt32((heading["subtitleColor"] as? String ?? "").dropFirst(), radix: 16) else {
+    fail("样式.json 缺少有效的标题样式")
+}
+let subtitleColor = color(subtitleHex)
+let title = NSMutableAttributedString(attributedString:
+    run(data.titlePrefix ?? "", titleSize, color(titleHex), mono: true, bold: titleBold))
+title.append(run(data.title, titleSize, color(titleHex), bold: titleBold))
 drawHeading(title, at: 28)
 
 let subtitle = NSMutableAttributedString(string: "")
-let subtitleParts = data.subtitle ?? [
-    .init(label: "", value: data.method, style: nil),
-    .init(label: "制图: ", value: data.credit, style: .credit),
-    .init(label: "数据源: ", value: data.source, style: .mono),
-    .init(label: "截至 ", value: data.asOf, style: .mono),
-]
+let subtitleParts: [ChartData.SubtitlePart]
+switch data.subtitle {
+case .text(let text): subtitleParts = [.init(label: "", value: text, style: nil)]
+case .parts(let parts): subtitleParts = parts
+case nil:
+    subtitleParts = [
+        .init(label: "", value: data.method, style: nil),
+        .init(label: "制图: ", value: data.credit, style: .credit),
+        .init(label: "数据源: ", value: data.source, style: .mono),
+        .init(label: "截至 ", value: data.asOf, style: .mono),
+    ]
+}
 let subtitleSeparator = data.subtitle == nil ? " | " : "｜"
 for part in subtitleParts {
     guard let value = part.value, !value.isEmpty else { continue }
     let separator = subtitle.length == 0 ? "" : subtitleSeparator
-    subtitle.append(run(separator + part.label, 12.5, subtitleColor))
+    subtitle.append(run(separator + part.label, subtitleSize, subtitleColor, bold: subtitleBold))
     let isCredit = part.style == .credit
-    subtitle.append(run(value, isCredit ? 18 : 12.5, isCredit ? .black : subtitleColor,
-                        mono: part.style == .mono, bold: isCredit))
+    subtitle.append(run(value, isCredit ? subtitleSize * 1.44 : subtitleSize, isCredit ? .black : subtitleColor,
+                        mono: part.style == .mono, bold: isCredit || subtitleBold))
 }
 drawHeading(subtitle, at: 66)
 
@@ -193,27 +241,35 @@ for index in stride(from: ceil(xMin / tickStep), through: floor(xMax / tickStep)
     context.strokePath()
     context.restoreGState()
     let number = String(format: "%g", tick)
-    let label = run(tick > 0 ? "+" + number : number, 13, tickColor, mono: true)
+    let label = run(data.points == nil && tick > 0 ? "+" + number : number, 13, tickColor, mono: true)
     label.draw(at: CGPoint(x: tickX - label.size().width / 2, y: panel.maxY + 4))
 }
 
 let logoSize = diameter * 0.8
-for (code, center) in zip(codes, centers) {
-    let file = logoDirectory.appendingPathComponent("\(code).webp")
-    guard let logo = NSImage(contentsOf: file), logo.isValid else {
-        fail("无法读取 \(code) 的球队 Logo：\(file.path)")
+for (point, center) in zip(points, centers) {
+    guard let path = point.logo else {
+        context.setFillColor(ink.cgColor)
+        context.fillEllipse(in: CGRect(x: center.x - 5, y: center.y - 5, width: 10, height: 10))
+        continue
     }
-    let rect = CGRect(x: center.x - logoSize / 2, y: center.y - logoSize / 2,
-                      width: logoSize, height: logoSize)
+    let file = URL(fileURLWithPath: path, relativeTo: input.deletingLastPathComponent())
+    guard let logo = NSImage(contentsOf: file), logo.isValid, max(logo.size.width, logo.size.height) > 0 else {
+        fail("无法读取 Logo：\(file.path)")
+    }
+    let factor = logoSize / max(logo.size.width, logo.size.height)
+    let width = logo.size.width * factor, height = logo.size.height * factor
+    let rect = CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
     logo.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true,
               hints: [.interpolation: NSImageInterpolation.high])
 }
 
-let weak = run("← \(data.leftLabel ?? "实力较弱")", 15.6, ink, bold: true)
-let strong = run("\(data.rightLabel ?? "实力较强") →", 15.6, ink, bold: true)
-let edgeInset = panel.width * 0.15 / 16.5
-weak.draw(at: CGPoint(x: panel.minX + edgeInset, y: panel.maxY - 27))
-strong.draw(at: CGPoint(x: panel.maxX - edgeInset - strong.size().width, y: panel.maxY - 27))
+if let left = data.leftLabel, !left.isEmpty {
+    run("← \(left)", 15.6, ink, bold: true).draw(at: CGPoint(x: panel.minX + 7, y: panel.maxY - 27))
+}
+if let right = data.rightLabel, !right.isEmpty {
+    let label = run("\(right) →", 15.6, ink, bold: true)
+    label.draw(at: CGPoint(x: panel.maxX - 7 - label.size().width, y: panel.maxY - 27))
+}
 
 bitmap.size = canvas.size
 guard let png = bitmap.representation(using: .png, properties: [:]) else { fail("无法编码 PNG") }
@@ -223,4 +279,4 @@ do {
 } catch {
     fail("无法保存图表：\(error.localizedDescription)")
 }
-print("已保存 \(teams.count) 支球队的图表：\(output.path)")
+print("已保存 \(points.count) 个数据点的图表：\(output.path)")
