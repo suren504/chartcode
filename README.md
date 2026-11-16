@@ -37,10 +37,10 @@ swift swift/散点图.swift 数据.json 成品图/我的图.png
 
 | 图型 | 专有字段 |
 | --- | --- |
-| 散点图 | `xAxis`、`yAxis` 各提供 `label`，可选视觉低端 `low` 和高端 `high` 文案。可用 `reverse` 反转刻度、用 `limits: [min, max]` 固定范围。`points` 每项提供 `x`、`y` 和可选 `logo`，按输入顺序覆盖。`quadrants` 设置四角文案，`quadrantColors` 可用相同的键（`topLeft`、`topRight`、`bottomLeft`、`bottomRight`）指定 `#RRGGBB` 颜色。`logoSize` 调整标记尺寸，`glow` 开启对角色晕。 |
+| 散点图 | `xAxis`、`yAxis` 各提供轴名称 `label` 和两端文案 `low`、`high`。可用 `reverse` 反转刻度、用 `limits: [min, max]` 固定范围。`points` 每项提供 `x`、`y` 和可选 `logo`，按输入顺序覆盖。`quadrants` 设置四角文案，`quadrantColors` 可用相同的键（`topLeft`、`topRight`、`bottomLeft`、`bottomRight`）指定 `#RRGGBB` 颜色。`logoSize` 调整标记尺寸。 |
 | 表格杠铃图 | `playerLabel` 和三个 `columnLabels` 是表头。`rows` 每项提供 `name`、`on`、`off`，可选 `minutes`、`avatar`、`logo`。默认用 `on - off` 计算并降序排列。 |
 | 蜂群图 | `points` 每项提供 `value` 和可选 `logo`，最多 30 个点。可用 `xRange: {min, max}` 固定刻度，`leftLabel`、`rightLabel` 设置方向文案。已有 NBA 输入仍支持 `teams: [{team, strength}]`，按球队缩写复用内置队标。 |
-| 桑基图 | `totalLabel` 是总量标签。`groups` 是两个分组，各含 `label` 与 `leaves: [{key, label}]`，共用最多六个子类。每个 `rows` 对象提供 `name` 和 `values`，按子类 key 填入非负数值。可选 `credit`、`columns`、`language`，以及行内的 `avatar`、`color`。 |
+| 桑基图 | `totalLabel` 是总量标签。`groups` 是两个分组，各含 `label` 与 `leaves: [{key, label}]`，共用最多六个子类。每个 `rows` 对象提供 `name` 和 `values`，按子类 key 填入非负数值。可选 `credit`、`columns`、`language`（默认简体中文 `zh-Hans`，英文用 `en`），以及行内的 `avatar`、`color`。 |
 
 散点图的最小输入示例
 
@@ -50,6 +50,7 @@ swift swift/散点图.swift 数据.json 成品图/我的图.png
   "title": "两项指标的关系",
   "xAxis": {"label": "指标一", "low": "较低", "high": "较高"},
   "yAxis": {"label": "指标二", "low": "较低", "high": "较高"},
+  "quadrants": {"topRight": "两项都高", "bottomLeft": "两项都低"},
   "points": [{"x": 2, "y": 4}, {"x": 5, "y": 9}]
 }
 ```
@@ -59,6 +60,8 @@ swift swift/散点图.swift 数据.json 成品图/我的图.png
 - `样式.json` 是两套引擎共用的标题样式配置。`header` 管理颜色和字重，各图型条目管理标题、副标题字号，也可覆盖通用设置。
 - 散点图默认以 X、Y 各自的最小值和最大值定范围，两端按 `样式.json` 中的 `axisPadding` 比例留边。需要固定范围时可显式传入 `limits`。
 - 散点图的虚线默认标出两轴中位数。输入 `"reference": "mean"` 可改为均值。
+- Swift 散点图固定绘制右上绿、左下红的渐变，要求提供 `quadrants.topRight`、`quadrants.bottomLeft` 及两轴的 `low`、`label`、`high`。轴标题自动排成 `<——低端文案  轴名称  高端文案——>`。两端文案按视觉位置填写，X 轴为左、右，Y 轴为下、上。
+- Python 散点图可用 `"glow": true` 开启渐变。
 - `swift/` 是 macOS 的 AppKit 渲染器，`python/` 是 Pillow 渲染器。布局和图形绘制规则留在对应模板。不同平台使用各自可用的系统字体。
 - `素材/` 存放共用的队标和背景。`R代码/` 保存独立的历史绘图脚本。
 - 新增图型时，在 `样式.json` 加一个同名条目，并在两个引擎目录各添加同名渲染器。两版共用输入字段，接收输入 JSON 和输出 PNG 路径，再更新上面的选图表和字段说明。

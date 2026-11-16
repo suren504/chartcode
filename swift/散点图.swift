@@ -7,6 +7,7 @@ struct Axis: Decodable {
     let low: String?, high: String?
     let reverse: Bool?
     let limits: [Double]?
+    let percent: Bool?
 }
 
 struct Point: Decodable {
@@ -23,9 +24,9 @@ struct Chart: Decodable {
     let points: [Point]
     let quadrants: [String: String]?
     let quadrantColors: [String: String]?
+    let backgroundColor: String?
     let reference: Reference?
     let logoSize: Double?
-    let glow: Bool?
 }
 
 struct ChartError: LocalizedError {
@@ -58,13 +59,39 @@ func ticks(_ range: ClosedRange<Double>) -> [Double] {
     return (0...6).map { first + Double($0) * step }.filter { $0 <= range.upperBound + step * 1e-9 }
 }
 
+func tickLabel(_ value: Double, axis: Axis) -> String {
+    let tick = value == 0 ? 0 : value
+    if axis.percent == true {
+        return String(format: "%g%%", tick * 100)
+    }
+    return String(format: "%g", tick)
+}
+
 func median(_ values: [Double]) -> Double {
     let sorted = values.sorted(), mid = sorted.count / 2
     return sorted.count.isMultiple(of: 2) ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
 }
 
+func axisTitle(_ axis: Axis, name: String) throws -> String {
+    let label = axis.label.trimmingCharacters(in: .whitespacesAndNewlines)
+    let low = axis.low?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let high = axis.high?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !label.isEmpty, !low.isEmpty, !high.isEmpty else {
+        throw ChartError(message: "\(name) 须填写轴名称 label 和两端文案 low、high")
+    }
+    return "<——\(low)  \(label)  \(high)——>"
+}
+
 func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
     guard !chart.points.isEmpty else { throw ChartError(message: "至少需要一个数据点") }
+    let xTitle = try axisTitle(chart.xAxis, name: "X 轴")
+    let yTitle = try axisTitle(chart.yAxis, name: "Y 轴")
+    guard let quadrants = chart.quadrants, ["topRight", "bottomLeft"].allSatisfy({ key in
+        guard let label = quadrants[key] else { return false }
+        return !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }) else {
+        throw ChartError(message: "quadrants 须填写右上角 topRight 和左下角 bottomLeft 的文案")
+    }
     let logoSize = chart.logoSize ?? 80
     guard (1...200).contains(logoSize) else { throw ChartError(message: "logoSize 须在 1 到 200 之间") }
     let styles = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("样式.json")))
@@ -97,11 +124,14 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
     func color(_ r: Double, _ g: Double, _ b: Double, _ alpha: Double = 1) -> NSColor {
         NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: alpha)
     }
-    let paper = color(255, 250, 240), ink = color(44, 62, 80), soft = color(86, 100, 115)
+    let ink = color(44, 62, 80), soft = color(86, 100, 115)
     func hexColor(_ value: String?) -> NSColor? {
         guard let value, value.count == 7, value.hasPrefix("#"),
               let rgb = UInt32(value.dropFirst(), radix: 16) else { return nil }
         return color(Double((rgb >> 16) & 255), Double((rgb >> 8) & 255), Double(rgb & 255))
+    }
+    guard let paper = hexColor(chart.backgroundColor ?? "#FFFAF0") else {
+        throw ChartError(message: "背景颜色须为 #RRGGBB")
     }
     guard let titleSize = heading["title"] as? Double, let subtitleSize = heading["subtitle"] as? Double,
           let titleBold = heading["titleBold"] as? Bool, let subtitleBold = heading["subtitleBold"] as? Bool,
@@ -148,34 +178,32 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
     }
     let midX = x(referenceValue(xs)), midY = y(referenceValue(ys))
     let green = color(114, 196, 165), red = color(233, 157, 171)
-    if chart.glow == true {
-        context.saveGState()
-        context.clip(to: plot)
-        for point in chart.points {
-            let p = position(point)
-            let dx = (p.x - midX) / max(1, p.x >= midX ? plot.maxX - midX : midX - plot.minX)
-            let dy = (midY - p.y) / max(1, p.y <= midY ? midY - plot.minY : plot.maxY - midY)
-            let score = (dx + dy) / 2
-            let weight = min(1, max(0, (abs(score) - 0.14) / 0.64))
-            if weight == 0 { continue }
-            let tint = score > 0 ? green : red
-            let colors = [0.62, 0.36, 0.10, 0].map { tint.withAlphaComponent($0 * weight).cgColor }
-            let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
-                                      colors: colors as CFArray, locations: [0, 0.35, 0.68, 1])!
-            context.drawRadialGradient(gradient, startCenter: p, startRadius: 0, endCenter: p,
-                                       endRadius: 42 + 133 * weight, options: [])
-        }
-        context.restoreGState()
+    context.saveGState()
+    context.clip(to: plot)
+    for point in chart.points {
+        let p = position(point)
+        let dx = (p.x - midX) / max(1, p.x >= midX ? plot.maxX - midX : midX - plot.minX)
+        let dy = (midY - p.y) / max(1, p.y <= midY ? midY - plot.minY : plot.maxY - midY)
+        let score = (dx + dy) / 2
+        let weight = min(1, max(0, (abs(score) - 0.14) / 0.64))
+        if weight == 0 { continue }
+        let tint = score > 0 ? green : red
+        let colors = [0.62, 0.36, 0.10, 0].map { tint.withAlphaComponent($0 * weight).cgColor }
+        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                  colors: colors as CFArray, locations: [0, 0.35, 0.68, 1])!
+        context.drawRadialGradient(gradient, startCenter: p, startRadius: 0, endCenter: p,
+                                   endRadius: 42 + 133 * weight, options: [])
     }
+    context.restoreGState()
     for tick in ticks(xDomain) {
         let value = x(tick)
         line(CGPoint(x: value, y: plot.minY), CGPoint(x: value, y: plot.maxY), grid)
-        text(String(format: "%g", tick == 0 ? 0 : tick), value, plot.maxY + 6, 17, soft, align: 0.5)
+        text(tickLabel(tick, axis: chart.xAxis), value, plot.maxY + 6, 17, soft, align: 0.5)
     }
     for tick in ticks(yDomain) {
         let value = y(tick)
         line(CGPoint(x: plot.minX, y: value), CGPoint(x: plot.maxX, y: value), grid)
-        text(String(format: "%g", tick == 0 ? 0 : tick), plot.minX - 10, value - 10, 17, soft, align: 1)
+        text(tickLabel(tick, axis: chart.yAxis), plot.minX - 10, value - 10, 17, soft, align: 1)
     }
     line(CGPoint(x: midX, y: plot.minY), CGPoint(x: midX, y: plot.maxY), guide, dashed: true)
     line(CGPoint(x: plot.minX, y: midY), CGPoint(x: plot.maxX, y: midY), guide, dashed: true)
@@ -192,32 +220,27 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
             context.fillEllipse(in: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10))
         }
     }
-    let corners: [(String, Double, Double, Double, NSColor)] = [
-        ("topLeft", plot.minX + 23, plot.minY + 25, 0, soft),
-        ("topRight", plot.maxX - 23, plot.minY + 25, 1, color(37, 92, 81)),
-        ("bottomLeft", plot.minX + 23, plot.maxY - 54, 0, color(133, 70, 83)),
-        ("bottomRight", plot.maxX - 23, plot.maxY - 54, 1, soft)
+    let neutral = color(100, 100, 100)
+    let corners: [(String, Double, Double, Double, NSColor, Bool)] = [
+        ("topLeft", plot.minX + 23, plot.minY + 25, 0, neutral, false),
+        ("topRight", plot.maxX - 23, plot.minY + 25, 1, color(37, 92, 81), true),
+        ("bottomLeft", plot.minX + 23, plot.maxY - 54, 0, color(133, 70, 83), true),
+        ("bottomRight", plot.maxX - 23, plot.maxY - 54, 1, neutral, false)
     ]
-    for (key, x, y, alignment, fill) in corners {
-        if let label = chart.quadrants?[key] {
-            text(label, x, y, 28, quadrantColors[key] ?? fill, bold: true, align: alignment)
+    for (key, x, y, alignment, fill, bold) in corners {
+        if let label = quadrants[key] {
+            text(label, x, y, 28, quadrantColors[key] ?? fill, bold: bold, align: alignment)
         }
-    }
-    func axisTitle(_ axis: Axis) -> String {
-        var parts = [axis.label]
-        if let low = axis.low, !low.isEmpty { parts.insert("<——\(low)", at: 0) }
-        if let high = axis.high, !high.isEmpty { parts.append("\(high)——>") }
-        return parts.joined(separator: "      ")
     }
     text(chart.title, 40, 25, titleSize, titleColor, bold: titleBold, maxWidth: width - 80)
     if let subtitle = chart.subtitle {
         text(subtitle, 40, 91, subtitleSize, subtitleColor, bold: subtitleBold, maxWidth: width - 80)
     }
-    text(axisTitle(chart.xAxis), plot.midX, plot.maxY + 44, 20, ink, bold: true, align: 0.5, maxWidth: plot.width)
+    text(xTitle, plot.midX, plot.maxY + 44, 20, ink, bold: true, align: 0.5, maxWidth: plot.width)
     context.saveGState()
     context.translateBy(x: 35, y: plot.midY)
     context.rotate(by: -.pi / 2)
-    text(axisTitle(chart.yAxis), 0, 0, 20, ink, bold: true, align: 0.5, maxWidth: plot.height)
+    text(yTitle, 0, 0, 20, ink, bold: true, align: 0.5, maxWidth: plot.height)
     context.restoreGState()
 
     try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)

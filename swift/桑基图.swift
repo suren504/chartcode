@@ -158,8 +158,8 @@ func face(_ size: CGFloat, bold: Bool = false, mono: Bool = false) -> NSFont {
         return NSFont(name: bold ? "Menlo-Bold" : "Menlo-Regular", size: size)
             ?? NSFont.monospacedSystemFont(ofSize: size, weight: weight)
     }
-    let family = language == "zh-Hant" ? "PingFangTC" : "PingFangSC"
-    if language != "en", let font = NSFont(name: family + (bold ? "-Semibold" : "-Regular"), size: size) {
+    if language != "en",
+       let font = NSFont(name: bold ? "PingFangSC-Semibold" : "PingFangSC-Regular", size: size) {
         return font
     }
     return NSFont.systemFont(ofSize: size, weight: weight)

@@ -53,16 +53,12 @@ def font_source(bold, mono, language):
             (linux / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"), 0),
         ]
     else:
-        traditional = language == "zh-Hant"
         candidates = [
-            (windows / (("msjhbd.ttc" if bold else "msjh.ttc") if traditional
-                        else ("msyhbd.ttc" if bold else "msyh.ttc")), 0),
-            (mac / ("STHeiti Medium.ttc" if bold else "STHeiti Light.ttc"), 0),
+            (windows / ("msyhbd.ttc" if bold else "msyh.ttc"), 0),
             (mac / "Hiragino Sans GB.ttc", 2 if bold else 0),
-            (noto / f"NotoSansCJK-{weight}.ttc", 3 if traditional else 2),
+            (mac / ("STHeiti Medium.ttc" if bold else "STHeiti Light.ttc"), 1),
+            (noto / f"NotoSansCJK-{weight}.ttc", 2),
         ]
-        if not traditional:
-            candidates[1], candidates[2] = candidates[2], candidates[1]
     for path, index in candidates:
         try:
             ImageFont.truetype(str(path), 16, index=index)
