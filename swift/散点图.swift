@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// 数据点按输入顺序绘制，后绘制的队标覆盖先绘制的队标。
+// 队标始终以原始数据坐标为中心，重叠时按输入顺序叠放。
 struct Axis: Decodable {
     let label: String
     let low: String?, high: String?
@@ -11,22 +11,42 @@ struct Axis: Decodable {
 }
 
 struct Point: Decodable {
+    struct Label: Decodable {
+        enum Side: String, Decodable { case above, below }
+
+        let text: String, color: String
+        let side: Side
+        let offsetX: Double?
+        let gap: Double?
+    }
+
     let x: Double, y: Double
     let logo: String?
+    let label: Label?
 }
 
 struct Chart: Decodable {
     enum Reference: String, Decodable { case median, mean }
 
+    struct Connection: Decodable {
+        let pointIndices: [Int]
+        let color: String
+    }
+
     let title: String
     let subtitle: String?
+    let subtitleEmphasis: String?
     let xAxis: Axis, yAxis: Axis
     let points: [Point]
+    let connections: [Connection]?
     let quadrants: [String: String]?
     let quadrantColors: [String: String]?
+    let quadrantOffsetsX: [String: Double]?
     let backgroundColor: String?
+    let backgroundImage: String?
     let reference: Reference?
     let logoSize: Double?
+    let glow: Bool?
 }
 
 struct ChartError: LocalizedError {
@@ -103,14 +123,15 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
     let xs = chart.points.map(\.x), ys = chart.points.map(\.y)
     let xDomain = try domain(chart.xAxis, xs, paddingRatio: padding)
     let yDomain = try domain(chart.yAxis, ys, paddingRatio: padding)
-    let logos = try chart.points.map { point -> NSImage? in
-        guard let path = point.logo else { return nil }
+    func loadImage(_ path: String) throws -> NSImage {
         let url = URL(fileURLWithPath: path, relativeTo: input.deletingLastPathComponent())
         guard let image = NSImage(contentsOf: url), image.size.width > 0, image.size.height > 0 else {
             throw ChartError(message: "无法读取素材：\(path)")
         }
         return image
     }
+    let logos = try chart.points.map { try $0.logo.map(loadImage) }
+    let background = try chart.backgroundImage.map(loadImage)
     let width = 1600.0, height = 1200.0, scale = 2.0
     let plot = CGRect(x: 116, y: 143, width: 1436, height: 958)
     let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale),
@@ -143,9 +164,20 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
         guard let tint = hexColor(value) else { throw ChartError(message: "象限颜色须为 #RRGGBB") }
         return tint
     }
-    let grid = color(230, 226, 217), guide = color(114, 120, 119)
+    let grid = background == nil ? color(230, 226, 217) : color(44, 62, 80, 0.14)
+    let guide = color(114, 120, 119)
     context.setFillColor(paper.cgColor)
     context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    if let background {
+        let tile = background.size
+        for tileY in stride(from: 0.0, to: height, by: tile.height) {
+            for tileX in stride(from: 0.0, to: width, by: tile.width) {
+                background.draw(in: CGRect(x: tileX, y: tileY, width: tile.width, height: tile.height),
+                                from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true,
+                                hints: [.interpolation: NSImageInterpolation.high])
+            }
+        }
+    }
 
     func font(_ size: Double, _ bold: Bool) -> NSFont {
         let primary = NSFont(name: bold ? "Menlo-Bold" : "Menlo-Regular", size: size)!
@@ -153,12 +185,26 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
         return NSFont(descriptor: primary.fontDescriptor.addingAttributes([.cascadeList: [cjk]]), size: size)!
     }
     func text(_ label: String, _ x: Double, _ y: Double, _ size: Double,
-              _ fill: NSColor, bold: Bool = false, align: Double = 0, maxWidth: Double? = nil) {
+              _ fill: NSColor, bold: Bool = false, align: Double = 0, maxWidth: Double? = nil,
+              verticalAlign: Double = 0, emphasis: String? = nil) {
         guard !label.isEmpty else { return }
-        let measure = (label as NSString).size(withAttributes: [.font: font(size, bold)]).width
-        let adjusted = min(size, max(1, size * (maxWidth ?? measure) / max(1, measure)))
-        let string = NSAttributedString(string: label, attributes: [.font: font(adjusted, bold), .foregroundColor: fill])
-        string.draw(at: CGPoint(x: x - align * string.size().width, y: y))
+        let emphasisRange = emphasis.map { (label as NSString).range(of: $0) }
+        func styledText(_ pointSize: Double) -> NSAttributedString {
+            let attributes: [NSAttributedString.Key: Any] = [.font: font(pointSize, bold), .foregroundColor: fill]
+            guard let range = emphasisRange, range.location != NSNotFound, range.length > 0 else {
+                return NSAttributedString(string: label, attributes: attributes)
+            }
+            let string = NSMutableAttributedString(string: label, attributes: attributes)
+            string.addAttributes([.font: font(pointSize * 1.3, true), .strokeWidth: -2, .strokeColor: fill], range: range)
+            return string
+        }
+        var string = styledText(size)
+        var bounds = string.size()
+        if let maxWidth, bounds.width > maxWidth {
+            string = styledText(max(1, size * maxWidth / bounds.width))
+            bounds = string.size()
+        }
+        string.draw(at: CGPoint(x: x - align * bounds.width, y: y - verticalAlign * bounds.height))
     }
     func line(_ start: CGPoint, _ end: CGPoint, _ fill: NSColor, dashed: Bool = false) {
         context.saveGState()
@@ -177,24 +223,26 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
         chart.reference == .mean ? values.reduce(0, +) / Double(values.count) : median(values)
     }
     let midX = x(referenceValue(xs)), midY = y(referenceValue(ys))
-    let green = color(114, 196, 165), red = color(233, 157, 171)
-    context.saveGState()
-    context.clip(to: plot)
-    for point in chart.points {
-        let p = position(point)
-        let dx = (p.x - midX) / max(1, p.x >= midX ? plot.maxX - midX : midX - plot.minX)
-        let dy = (midY - p.y) / max(1, p.y <= midY ? midY - plot.minY : plot.maxY - midY)
-        let score = (dx + dy) / 2
-        let weight = min(1, max(0, (abs(score) - 0.14) / 0.64))
-        if weight == 0 { continue }
-        let tint = score > 0 ? green : red
-        let colors = [0.62, 0.36, 0.10, 0].map { tint.withAlphaComponent($0 * weight).cgColor }
-        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
-                                  colors: colors as CFArray, locations: [0, 0.35, 0.68, 1])!
-        context.drawRadialGradient(gradient, startCenter: p, startRadius: 0, endCenter: p,
-                                   endRadius: 42 + 133 * weight, options: [])
+    if chart.glow != false {
+        let green = color(114, 196, 165), red = color(233, 157, 171)
+        context.saveGState()
+        context.clip(to: plot)
+        for point in chart.points {
+            let p = position(point)
+            let dx = (p.x - midX) / max(1, p.x >= midX ? plot.maxX - midX : midX - plot.minX)
+            let dy = (midY - p.y) / max(1, p.y <= midY ? midY - plot.minY : plot.maxY - midY)
+            let score = (dx + dy) / 2
+            let weight = min(1, max(0, (abs(score) - 0.14) / 0.64))
+            if weight == 0 { continue }
+            let tint = score > 0 ? green : red
+            let colors = [0.62, 0.36, 0.10, 0].map { tint.withAlphaComponent($0 * weight).cgColor }
+            let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                      colors: colors as CFArray, locations: [0, 0.35, 0.68, 1])!
+            context.drawRadialGradient(gradient, startCenter: p, startRadius: 0, endCenter: p,
+                                       endRadius: 42 + 133 * weight, options: [])
+        }
+        context.restoreGState()
     }
-    context.restoreGState()
     for tick in ticks(xDomain) {
         let value = x(tick)
         line(CGPoint(x: value, y: plot.minY), CGPoint(x: value, y: plot.maxY), grid)
@@ -207,17 +255,44 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
     }
     line(CGPoint(x: midX, y: plot.minY), CGPoint(x: midX, y: plot.maxY), guide, dashed: true)
     line(CGPoint(x: plot.minX, y: midY), CGPoint(x: plot.maxX, y: midY), guide, dashed: true)
+    for connection in chart.connections ?? [] {
+        guard connection.pointIndices.count >= 2,
+              connection.pointIndices.allSatisfy(chart.points.indices.contains) else {
+            throw ChartError(message: "折线须引用至少两个有效的点位索引（从 0 开始）")
+        }
+        guard let tint = hexColor(connection.color) else { throw ChartError(message: "折线颜色须为 #RRGGBB") }
+        let vertices = connection.pointIndices.map { position(chart.points[$0]) }
+        // 先画折线，再按原顺序绘制头像和队标。
+        context.saveGState()
+        context.setStrokeColor(tint.cgColor)
+        context.setLineWidth(1.6)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        context.addLines(between: vertices)
+        context.strokePath()
+        context.restoreGState()
+    }
     for (point, logo) in zip(chart.points, logos) {
         let p = position(point)
+        let halfHeight: Double
         if let logo {
             let factor = logoSize / max(logo.size.width, logo.size.height)
             let w = logo.size.width * factor, h = logo.size.height * factor
-            logo.draw(in: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h),
+            halfHeight = h / 2
+            logo.draw(in: CGRect(x: p.x - w / 2, y: p.y - halfHeight, width: w, height: h),
                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true,
                       hints: [.interpolation: NSImageInterpolation.high])
         } else {
+            halfHeight = 5
             context.setFillColor(ink.cgColor)
             context.fillEllipse(in: CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10))
+        }
+        if let label = point.label {
+            guard let tint = hexColor(label.color) else { throw ChartError(message: "点位标注颜色须为 #RRGGBB") }
+            let gap = halfHeight + (label.gap ?? 7)
+            let above = label.side == .above
+            text(label.text, p.x + (label.offsetX ?? 0), p.y + (above ? -gap : gap), 17, tint,
+                 bold: true, align: 0.5, verticalAlign: above ? 1 : 0)
         }
     }
     let neutral = color(100, 100, 100)
@@ -229,12 +304,14 @@ func render(_ chart: Chart, input: URL, output: URL, root: URL) throws {
     ]
     for (key, x, y, alignment, fill, bold) in corners {
         if let label = quadrants[key] {
-            text(label, x, y, 28, quadrantColors[key] ?? fill, bold: bold, align: alignment)
+            let offset = chart.quadrantOffsetsX?[key] ?? 0
+            text(label, x + offset, y, 28, quadrantColors[key] ?? fill, bold: bold, align: alignment)
         }
     }
     text(chart.title, 40, 25, titleSize, titleColor, bold: titleBold, maxWidth: width - 80)
     if let subtitle = chart.subtitle {
-        text(subtitle, 40, 91, subtitleSize, subtitleColor, bold: subtitleBold, maxWidth: width - 80)
+        text(subtitle, 40, 91, subtitleSize, subtitleColor, bold: subtitleBold, maxWidth: width - 80,
+             emphasis: chart.subtitleEmphasis)
     }
     text(xTitle, plot.midX, plot.maxY + 44, 20, ink, bold: true, align: 0.5, maxWidth: plot.width)
     context.saveGState()

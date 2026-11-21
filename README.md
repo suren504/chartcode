@@ -60,8 +60,8 @@ swift swift/散点图.swift 数据.json 成品图/我的图.png
 - `样式.json` 是两套引擎共用的标题样式配置。`header` 管理颜色和字重，各图型条目管理标题、副标题字号，也可覆盖通用设置。
 - 散点图默认以 X、Y 各自的最小值和最大值定范围，两端按 `样式.json` 中的 `axisPadding` 比例留边。需要固定范围时可显式传入 `limits`。
 - 散点图的虚线默认标出两轴中位数。输入 `"reference": "mean"` 可改为均值。
-- Swift 散点图固定绘制右上绿、左下红的渐变，要求提供 `quadrants.topRight`、`quadrants.bottomLeft` 及两轴的 `low`、`label`、`high`。轴标题自动排成 `<——低端文案  轴名称  高端文案——>`。两端文案按视觉位置填写，X 轴为左、右，Y 轴为下、上。
-- Python 散点图可用 `"glow": true` 开启渐变。
+- Swift 散点图要求提供 `quadrants.topRight`、`quadrants.bottomLeft` 及两轴的 `low`、`label`、`high`。轴标题自动排成 `<——低端文案  轴名称  高端文案——>`。两端文案按视觉位置填写，X 轴为左、右，Y 轴为下、上。
+- `glow` 控制队标下方的红绿渐变，Swift 默认开启，Python 默认关闭。
 - `swift/` 是 macOS 的 AppKit 渲染器，`python/` 是 Pillow 渲染器。布局和图形绘制规则留在对应模板。不同平台使用各自可用的系统字体。
 - `素材/` 存放共用的队标和背景。`R代码/` 保存独立的历史绘图脚本。
 - 新增图型时，在 `样式.json` 加一个同名条目，并在两个引擎目录各添加同名渲染器。两版共用输入字段，接收输入 JSON 和输出 PNG 路径，再更新上面的选图表和字段说明。

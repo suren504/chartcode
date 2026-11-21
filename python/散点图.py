@@ -132,6 +132,7 @@ def render_python(chart, source, output):
 
     reference_value = fmean if chart.get("reference") == "mean" else median
     mid_x, mid_y = x(reference_value(xs)), y(reference_value(ys))
+    # 队标始终以原始数据坐标为中心，允许重叠。
     centers = [(x(point["x"]), y(point["y"])) for point in points]
     if chart.get("glow"):
         layer = Image.new("RGBA", ((RIGHT - LEFT) * SCALE, (BOTTOM - TOP) * SCALE))
